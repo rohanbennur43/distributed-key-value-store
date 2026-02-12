@@ -1,0 +1,177 @@
+syntax = "proto3";
+
+package kvpb;
+
+option go_package = "dkv/proto/kvpb";
+
+// --- Operation type used in the replicated log ---
+
+enum OpType {
+    OP_PUT    = 0;
+    OP_APPEND = 1;
+    OP_DELETE = 2;
+    OP_NOOP   = 3;
+}
+
+message Operation {
+    OpType type      = 1;
+    string key       = 2;
+    string value     = 3;
+    string client_id = 4;
+    int64  op_id     = 5;
+}
+
+message ProposalNumber {
+    int64 round     = 1;
+    int32 server_id = 2;
+}
+
+// ============================================================
+// KVService — client-facing API
+// ============================================================
+
+message GetRequest {
+    string key       = 1;
+    string client_id = 2;
+    int64  op_id     = 3;
+}
+message GetResponse {
+    string value = 1;
+    bool   found = 2;
+    string error = 3;
+}
+
+message PutRequest {
+    string key       = 1;
+    string value     = 2;
+    string client_id = 3;
+    int64  op_id     = 4;
+}
+message PutResponse {
+    string error = 1;
+}
+
+message AppendRequest {
+    string key       = 1;
+    string value     = 2;
+    string client_id = 3;
+    int64  op_id     = 4;
+}
+message AppendResponse {
+    string error = 1;
+}
+
+message DeleteRequest {
+    string key       = 1;
+    string client_id = 2;
+    int64  op_id     = 3;
+}
+message DeleteResponse {
+    bool   found = 1;
+    string error = 2;
+}
+
+service KVService {
+    rpc Get(GetRequest)       returns (GetResponse);
+    rpc Put(PutRequest)       returns (PutResponse);
+    rpc Append(AppendRequest) returns (AppendResponse);
+    rpc Delete(DeleteRequest) returns (DeleteResponse);
+}
+
+// ============================================================
+// PaxosService — inter-node consensus RPCs
+// ============================================================
+
+message PrepareRequest {
+    int64          log_index = 1;
+    ProposalNumber proposal  = 2;
+}
+message PrepareResponse {
+    bool           promised          = 1;
+    ProposalNumber accepted_proposal = 2;
+    Operation      accepted_value    = 3;
+    bool           has_accepted      = 4;
+    ProposalNumber highest_promised  = 5;
+}
+
+message AcceptRequest {
+    int64          log_index = 1;
+    ProposalNumber proposal  = 2;
+    Operation      value     = 3;
+}
+message AcceptResponse {
+    bool           accepted = 1;
+    ProposalNumber min_proposal = 2;
+}
+
+message LearnRequest {
+    int64          log_index = 1;
+    Operation      value     = 2;
+    ProposalNumber proposal  = 3;
+}
+message LearnResponse {}
+
+message FetchChosenRequest {
+    int64 from_index = 1;
+}
+message ChosenEntry {
+    int64     log_index = 1;
+    Operation value     = 2;
+}
+message FetchChosenResponse {
+    repeated ChosenEntry entries         = 1;
+    int64                max_chosen_index = 2;
+}
+
+service PaxosService {
+    rpc Prepare(PrepareRequest)         returns (PrepareResponse);
+    rpc Accept(AcceptRequest)           returns (AcceptResponse);
+    rpc Learn(LearnRequest)             returns (LearnResponse);
+    rpc FetchChosen(FetchChosenRequest) returns (FetchChosenResponse);
+}
+
+// ============================================================
+// AdminService — health, metrics, fault injection
+// ============================================================
+
+message HealthRequest {}
+message HealthResponse {
+    bool  healthy            = 1;
+    int32 server_id          = 2;
+    int64 chosen_index       = 3;
+    int64 last_applied_index = 4;
+}
+
+message MetricsRequest {}
+message MetricsResponse {
+    map<string, int64> counters = 1;
+}
+
+message DropRule {
+    int32  target_server_id = 1;
+    double drop_rate        = 2;
+}
+message SetDropRulesRequest {
+    repeated DropRule rules = 1;
+}
+message SetDropRulesResponse {}
+
+message FetchLogRequest {
+    int64 from_index = 1;
+    int64 to_index   = 2;
+}
+message LogEntry {
+    int64     index  = 1;
+    bool      chosen = 2;
+    Operation value  = 3;
+}
+message FetchLogResponse {
+    repeated LogEntry entries = 1;
+}
+
+service AdminService {
+    rpc Health(HealthRequest)           returns (HealthResponse);
+    rpc Metrics(MetricsRequest)         returns (MetricsResponse);
+    rpc SetDropRules(SetDropRulesRequest) returns (SetDropRulesResponse);
+    rpc FetchLog(FetchLogRequest)       returns (FetchLogResponse);
+}
