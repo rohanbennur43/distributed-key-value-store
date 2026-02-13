@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"math/rand"
 	"sync"
 	"time"
@@ -175,7 +176,6 @@ func (e *Engine) Propose(op *Operation) (int64, error) {
 		index := e.nextAvailableIndex()
 		chosenOp, err := e.proposeAt(index, op)
 		if err != nil {
-			log.Printf("[node %d] propose at index %d failed: %v", e.serverID, index, err)
 			// Back off on contention.
 			jitter := time.Duration(rand.Intn(30)+10) * time.Millisecond
 			time.Sleep(jitter)
@@ -187,9 +187,8 @@ func (e *Engine) Propose(op *Operation) (int64, error) {
 			return index, nil
 		}
 
-		// Someone else's value was chosen. Try again at a different index.
-		log.Printf("[node %d] index %d: our op (%s) displaced by %s, retrying",
-			e.serverID, index, op, chosenOp)
+		// Someone else's value was chosen at this index. Advance.
+		log.Printf("[node %d] index %d: displaced, retrying", e.serverID, index)
 	}
 	return 0, ErrTooManyRetries
 }
@@ -199,11 +198,18 @@ func (e *Engine) Propose(op *Operation) (int64, error) {
 func (e *Engine) proposeAt(index int64, op *Operation) (*Operation, error) {
 	inst := e.getInstance(index)
 
-	// If already chosen, just return the chosen value.
+	// If already chosen, ensure maxChosen is up-to-date (handles race
+	// where a Learn goroutine set inst.Chosen but hasn't updated maxChosen
+	// yet) and return the chosen value.
 	inst.mu.Lock()
 	if inst.Chosen {
 		v := inst.ChosenValue
 		inst.mu.Unlock()
+		e.mu.Lock()
+		if index > e.maxChosen {
+			e.maxChosen = index
+		}
+		e.mu.Unlock()
 		return v, nil
 	}
 	inst.mu.Unlock()
@@ -216,14 +222,20 @@ func (e *Engine) proposeAt(index int64, op *Operation) (*Operation, error) {
 		return nil, err
 	}
 
-	// Determine value: must use highest accepted value if any.
+	// Determine value: Paxos requires adopting the value from the highest
+	// accepted proposal seen in any promise. Use a flag so even a zero-valued
+	// proposal number is correctly handled.
 	value := op
+	foundAccepted := false
 	var highestAccepted ProposalNum
 	for _, p := range promises {
-		if p.HasAccepted && p.AcceptedProposal.GreaterThan(highestAccepted) {
-			highestAccepted = p.AcceptedProposal
-			copied := *p.AcceptedValue
-			value = &copied
+		if p.HasAccepted && p.AcceptedValue != nil {
+			if !foundAccepted || p.AcceptedProposal.GreaterThan(highestAccepted) {
+				highestAccepted = p.AcceptedProposal
+				copied := *p.AcceptedValue
+				value = &copied
+				foundAccepted = true
+			}
 		}
 	}
 
@@ -399,12 +411,13 @@ func (e *Engine) sendLearns(index int64, value *Operation, proposal ProposalNum)
 func (e *Engine) HandlePrepare(index int64, proposal ProposalNum) (*PrepareResult, error) {
 	inst := e.getInstance(index)
 
-	// If already chosen, just return the chosen value.
+	// If already chosen, return a synthetic promise with a max-valued
+	// accepted proposal so the chosen value always wins adoption.
 	inst.mu.Lock()
 	if inst.Chosen {
 		res := &PrepareResult{
 			Promised:         true,
-			AcceptedProposal: ProposalNum{},
+			AcceptedProposal: ProposalNum{Round: math.MaxInt64, ServerID: math.MaxInt32},
 			AcceptedValue:    inst.ChosenValue,
 			HasAccepted:      true,
 		}
